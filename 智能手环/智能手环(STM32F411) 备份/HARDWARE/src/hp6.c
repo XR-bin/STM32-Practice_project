@@ -1,0 +1,401 @@
+#include "stm32f4xx.h"
+#include "hp6.h"
+#include "iic.h"
+
+//延时函数毫秒
+static void delay_ms(u32 ms)
+{
+	u32 i = 168 / 4 * 1000 * ms;   //由系统时钟频率决定的
+	while(i)
+	{
+		i--;
+	}
+}
+
+/******************************CRC校验代码*************************************/
+//crc校验表
+const u16 crc16_tab[256] =
+{
+	0x0000, 0xC0C1, 0xC181, 0x0140, 0xC301, 0x03C0, 0x0280, 0xC241,   
+	0xC601, 0x06C0, 0x0780, 0xC741, 0x0500, 0xC5C1, 0xC481, 0x0440,   
+	0xCC01, 0x0CC0, 0x0D80, 0xCD41, 0x0F00, 0xCFC1, 0xCE81, 0x0E40,   
+	0x0A00, 0xCAC1, 0xCB81, 0x0B40, 0xC901, 0x09C0, 0x0880, 0xC841,   
+	0xD801, 0x18C0, 0x1980, 0xD941, 0x1B00, 0xDBC1, 0xDA81, 0x1A40,   
+	0x1E00, 0xDEC1, 0xDF81, 0x1F40, 0xDD01, 0x1DC0, 0x1C80, 0xDC41,   
+	0x1400, 0xD4C1, 0xD581, 0x1540, 0xD701, 0x17C0, 0x1680, 0xD641,   
+	0xD201, 0x12C0, 0x1380, 0xD341, 0x1100, 0xD1C1, 0xD081, 0x1040,   
+	0xF001, 0x30C0, 0x3180, 0xF141, 0x3300, 0xF3C1, 0xF281, 0x3240,   
+	0x3600, 0xF6C1, 0xF781, 0x3740, 0xF501, 0x35C0, 0x3480, 0xF441,   
+	0x3C00, 0xFCC1, 0xFD81, 0x3D40, 0xFF01, 0x3FC0, 0x3E80, 0xFE41,   
+	0xFA01, 0x3AC0, 0x3B80, 0xFB41, 0x3900, 0xF9C1, 0xF881, 0x3840,   
+	0x2800, 0xE8C1, 0xE981, 0x2940, 0xEB01, 0x2BC0, 0x2A80, 0xEA41,   
+	0xEE01, 0x2EC0, 0x2F80, 0xEF41, 0x2D00, 0xEDC1, 0xEC81, 0x2C40,   
+	0xE401, 0x24C0, 0x2580, 0xE541, 0x2700, 0xE7C1, 0xE681, 0x2640,   
+	0x2200, 0xE2C1, 0xE381, 0x2340, 0xE101, 0x21C0, 0x2080, 0xE041,   
+	0xA001, 0x60C0, 0x6180, 0xA141, 0x6300, 0xA3C1, 0xA281, 0x6240,  
+	0x6600, 0xA6C1, 0xA781, 0x6740, 0xA501, 0x65C0, 0x6480, 0xA441,   
+	0x6C00, 0xACC1, 0xAD81, 0x6D40, 0xAF01, 0x6FC0, 0x6E80, 0xAE41,   
+	0xAA01, 0x6AC0, 0x6B80, 0xAB41, 0x6900, 0xA9C1, 0xA881, 0x6840,   
+	0x7800, 0xB8C1, 0xB981, 0x7940, 0xBB01, 0x7BC0, 0x7A80, 0xBA41,   
+	0xBE01, 0x7EC0, 0x7F80, 0xBF41, 0x7D00, 0xBDC1, 0xBC81, 0x7C40,   
+	0xB401, 0x74C0, 0x7580, 0xB541, 0x7700, 0xB7C1, 0xB681, 0x7640,   
+	0x7200, 0xB2C1, 0xB381, 0x7340, 0xB101, 0x71C0, 0x7080, 0xB041,   
+	0x5000, 0x90C1, 0x9181, 0x5140, 0x9301, 0x53C0, 0x5280, 0x9241,   
+	0x9601, 0x56C0, 0x5780, 0x9741, 0x5500, 0x95C1, 0x9481, 0x5440,   
+	0x9C01, 0x5CC0, 0x5D80, 0x9D41, 0x5F00, 0x9FC1, 0x9E81, 0x5E40,   
+	0x5A00, 0x9AC1, 0x9B81, 0x5B40, 0x9901, 0x59C0, 0x5880, 0x9841,   
+	0x8801, 0x48C0, 0x4980, 0x8941, 0x4B00, 0x8BC1, 0x8A81, 0x4A40,   
+	0x4E00, 0x8EC1, 0x8F81, 0x4F40, 0x8D01, 0x4DC0, 0x4C80, 0x8C41,   
+	0x4400, 0x84C1, 0x8581, 0x4540, 0x8701, 0x47C0, 0x4680, 0x8641,   
+	0x8201, 0x42C0, 0x4380, 0x8341, 0x4100, 0x81C1, 0x8081, 0x4040 
+};
+
+//校验函数
+u16 Crc16(u8 *data,u8 len)
+{
+    u16 crc16 = 0xFFFF;
+    u32 uIndex ; //CRC查询表索引
+    while (len --)
+    {
+        uIndex = (crc16&0xff) ^ ((*data) & 0xff) ; //计算CRC
+				data = data + 1;
+        crc16 = ((crc16>>8) & 0xff) ^ crc16_tab[uIndex];
+    }
+    return crc16 ;//返回CRC校验值
+}
+
+/****************************指令数据包***********************************/
+//开启血压测量
+u8 cmd_bp_open[]=
+{0xc8,0xd7,0xb6,0xa5,0x90,0x01,0x00,0x00,
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+//关闭血压测量
+u8 cmd_bp_close[]=
+{0xc8,0xd7,0xb6,0xa5,0x90,0x00,0x00,0x00,
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+//获取血压测量结果
+u8 cmd_bp_result[]=
+{0xc8,0xd7,0xb6,0xa5,0x90,0x02,0x00,0x00,
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+
+
+//开启心率测量
+u8 cmd_rate_open[]=
+{0xc8,0xd7,0xb6,0xa5,0xD0,0x01,0x00,0x00,
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+//关闭心率测量
+u8 cmd_rate_close[]=
+{0xc8,0xd7,0xb6,0xa5,0xD0,0x00,0x00,0x00,
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+//获取心率测量结果
+u8 cmd_rate_result[]=
+{0xc8,0xd7,0xb6,0xa5,0xD0,0x02,0x00,0x00,
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+
+//获取ADC 数据
+u8 cmd_get_adc[]=
+{0xc8,0xd7,0xb6,0xa5,0x91,0x00,0x00,0x00,
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+
+//设置低功耗
+u8 cmd_set_powersaving[]=
+{0xc8,0xd7,0xb6,0xa5,0x70,0x01,0x00,0x00,
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+
+//获取版本信息
+u8 cmd_get_version[]=
+{0xc8,0xd7,0xb6,0xa5,0xa2,0x02,0x00,0x00,
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+
+
+/*******************************HP6函数************************************/
+/*****************************************************
+*函数功能  ：对血压心率传感器进行初始化
+*函数名    ：HP6_Init
+*函数参数  ：void
+*函数返回值：void
+*描述      ：
+*            HP6电源脚 ------ PC13
+********************************************************/
+void HP6_Init(void)
+{
+	GPIO_InitTypeDef  GPIO_InitStruct;       //GPIOx配置结构体
+	
+	//HP6的IIC初始化
+	IIC_Hp6_Init();
+	
+	/****HP6电源脚初始化****/
+	//时钟使能  GPIOC 
+  RCC_AHB1PeriphClockCmd(RCC_AHB1Periph_GPIOC, ENABLE);
+
+  /*GPIOx端口配置*/
+  //PA2
+  GPIO_InitStruct.GPIO_Pin = GPIO_Pin_13;            //选择PA13
+  GPIO_InitStruct.GPIO_Mode = GPIO_Mode_OUT;         //普通输出
+  GPIO_InitStruct.GPIO_OType = GPIO_OType_PP;        //推挽输出
+  GPIO_InitStruct.GPIO_Speed = GPIO_Speed_50MHz;     //速度为50MHz
+  GPIO_Init(GPIOC, &GPIO_InitStruct);                //根据设定参数初始化PC13
+	
+	//使能电源脚(本来是高电平触发的，但由于硬件设计的原因所以是低电平使能)
+	GPIO_ResetBits(GPIOC,GPIO_Pin_13);
+}
+
+/*****************************************************
+*函数功能  ：向HP6发送数据包
+*函数名    ：HP6_Send
+*函数参数  ：u8 *cmd
+*函数返回值：u8
+*描述      ：
+*            HP6电源脚 ------ PC13
+********************************************************/
+u8 HP6_Send(u8 *cmd)
+{
+	u8 ack,i;
+	
+	//起始信号
+	IIC_Hp6_Start();
+	//发送写操作命令
+	IIC_Hp6_Send_Byte(HP6_WRITE);
+	//等待应答
+	ack = IIC_Hp6_Receive_Ack();
+	//发送操作指令失败
+	if(ack == 1)
+	{
+		//停止信号
+		IIC_Hp6_Stop();
+		return 1;
+	}
+	//发送24字节数据
+	for(i=0;i<24;i++)
+	{
+		//发送数据
+		IIC_Hp6_Send_Byte(*(cmd+i)); 
+		//等待应答
+		ack = IIC_Hp6_Receive_Ack();
+		//发送数据失败
+		if(ack == 1)
+		{
+			//停止信号
+			IIC_Hp6_Stop();
+			return 2;
+		}
+	}
+	
+	//停止信号
+	IIC_Hp6_Stop();
+	//发送完成
+	return 0;
+}
+
+/*****************************************************
+*函数功能  ：接收HP6发送过来的数据包
+*函数名    ：HP6_Send
+*函数参数  ：u8 *buf
+*函数返回值：u8
+*描述      ：
+*            HP6电源脚 ------ PC13
+********************************************************/
+u8 HP6_Receive(u8 *buf)
+{
+	u8 ack,i;
+	
+	//起始信号
+	IIC_Hp6_Start();
+	//发送写操作命令
+	IIC_Hp6_Send_Byte(HP6_READ);
+	//等待应答
+	ack = IIC_Hp6_Receive_Ack();
+	//发送操作指令失败
+	if(ack == 1)
+	{
+		//停止信号
+		IIC_Hp6_Stop();
+		return 1;
+	}
+	//读24字节数据
+	for(i=0;i<24;i++)
+	{
+		//读取数据
+		*(buf+i) = IIC_Hp6_Receive_Byte(); 
+		if(i == 23)
+		{
+			IIC_Hp6_Send_Ack(1);   //不再接收数据
+		}
+		else
+		{
+			IIC_Hp6_Send_Ack(0);   //继续接收下一个字节数据
+		}
+	}
+	
+	//停止信号
+	IIC_Hp6_Stop();
+	
+	return ack;
+}
+
+
+/*********************************************************
+*函数功能  ：向HP6发送指令数据包，并接收HP6发送回来的数据包
+*函数名    ：HP6_Send_Data
+*函数参数  ：u8 *se_buff,u8 *rx_buff
+*函数返回值：u8
+*描述      ：
+*            HP6电源脚 ------ PC13
+**********************************************************/
+u8 HP6_Send_Data(u8 *se_buff,u8 *re_buff)
+{
+	u8 state = 1;
+  u16 crc;
+
+	/*校验要发送的命令数组*/
+  crc = Crc16(&se_buff[4], 18);	  //计算要发送的数据包的CRC校验数值
+  *(u16 *)(&se_buff[22]) = crc;   //数据包的第23-24个字节是CRC校验数据
+	
+	//发送指令包给HP6
+	HP6_Send(se_buff);
+	//等待HP6将数据准备好
+	delay_ms(5);
+	//接收HP6发回来的数据包
+	HP6_Receive(re_buff);
+	
+	/*对接收到数据包进行CRC校验*/
+	crc = *(u16 *)(&re_buff[22]);	    //计算数据包的CRC值
+	//判断CRC值是否一致
+  if(crc != Crc16(&re_buff[4], 18))	
+  {
+    state = 0;     //校验失败
+  }
+	
+	return state;
+}
+
+/*********************************************************
+*函数功能  ：开启心率测量
+*函数名    ：HP6_OpenRate
+*函数参数  ：void
+*函数返回值：u8
+*描述      ：
+*            HP6电源脚 ------ PC13
+**********************************************************/
+u8 HP6_OpenRate(void)
+{
+	u8 state;
+	u8 re_buff[24];
+	
+	//电源使能开启
+	HP6_EN;
+	
+	state = HP6_Send_Data(cmd_rate_open,re_buff);
+	
+	return state;
+}
+
+/*********************************************************
+*函数功能  ：获取心率测量结果函数
+*函数名    ：HP6_GetRateResult
+*函数参数  ：u8 *re_buff
+*函数返回值：u8
+*描述      ：
+*            HP6电源脚 ------ PC13
+**********************************************************/
+u8 HP6_GetRateResult(u8 *re_buff)
+{
+	u8 state;
+	
+	state = HP6_Send_Data(cmd_rate_result,re_buff);
+	
+	return state;
+}
+
+/*********************************************************
+*函数功能  ：关闭心率测量
+*函数名    ：HP6_CloseRate
+*函数参数  ：void
+*函数返回值：u8
+*描述      ：
+*            HP6电源脚 ------ PC13
+**********************************************************/
+u8 HP6_CloseRate(void)
+{
+	u8 state;
+	u8 re_buff[24];
+	
+	state = HP6_Send_Data(cmd_rate_close,re_buff);
+	
+	//电源使能关闭
+	HP6_DIS;
+	
+	return state;
+}
+
+/*********************************************************
+*函数功能  ：开启血压测量
+*函数名    ：HP6_OpenBloodp
+*函数参数  ：void
+*函数返回值：u8
+*描述      ：
+*            HP6电源脚 ------ PC13
+**********************************************************/
+u8 HP6_OpenBlood(void)
+{
+	u8 state;
+	u8 re_buff[24];
+	
+	//电源使能开启
+	HP6_EN;
+	
+	state = HP6_Send_Data(cmd_bp_open,re_buff);
+	
+	return state;
+}
+
+/*********************************************************
+*函数功能  ：获取血压测量结果函数
+*函数名    ：HP6_GetBloodResult
+*函数参数  ：u8 *re_buff
+*函数返回值：u8
+*描述      ：
+*            HP6电源脚 ------ PC13
+**********************************************************/
+u8 HP6_GetBloodResult(u8 *re_buff)
+{
+	u8 state;
+	
+	state = HP6_Send_Data(cmd_bp_result,re_buff);
+	
+	return state;
+}
+
+/*********************************************************
+*函数功能  ：关闭血压测量
+*函数名    ：HP6_CloseBlood
+*函数参数  ：void
+*函数返回值：u8
+*描述      ：
+*            HP6电源脚 ------ PC13
+**********************************************************/
+u8 HP6_CloseBlood(void)
+{
+	u8 state;
+	u8 re_buff[24];
+	
+	state = HP6_Send_Data(cmd_bp_close,re_buff);
+	
+	//电源使能关闭
+	HP6_DIS;
+	
+	return state;
+}
+
+
+
+
